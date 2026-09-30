@@ -12,19 +12,22 @@ import android.media.AudioTrack;
 import android.os.Build;
 import android.os.IBinder;
 
+import java.util.Locale;
+
 public class KeepAliveService extends Service {
     public static final String ACTION_START = "com.example.dacawake.START";
     public static final String ACTION_STOP = "com.example.dacawake.STOP";
-    public static final String ACTION_SET_LEVEL = "com.example.dacawake.SET_LEVEL";
-    public static final String EXTRA_AMPLITUDE = "amplitude";
+    public static final String ACTION_SET_PARAMS = "com.example.dacawake.SET_PARAMS";
+    public static final String EXTRA_FREQUENCY_HZ = "frequency_hz";
+    public static final String EXTRA_LEVEL_DBFS = "level_dbfs";
 
     private static final String CHANNEL_ID = "dac_awake";
     private static final int NOTIFICATION_ID = 7;
     private static final int SAMPLE_RATE = 48000;
-    private static final double TONE_HZ = 997.0;
 
     private volatile boolean running = false;
-    private volatile int amplitude = 4;
+    private volatile double frequencyHz = 18.0;
+    private volatile int levelDbfs = -50;
     private Thread audioThread;
     private AudioTrack track;
 
@@ -37,9 +40,7 @@ public class KeepAliveService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent != null ? intent.getAction() : ACTION_START;
-        if (intent != null && intent.hasExtra(EXTRA_AMPLITUDE)) {
-            amplitude = Math.max(1, Math.min(128, intent.getIntExtra(EXTRA_AMPLITUDE, 4)));
-        }
+        readParams(intent);
 
         if (ACTION_STOP.equals(action)) {
             stopAudio();
@@ -48,13 +49,31 @@ public class KeepAliveService extends Service {
             return START_NOT_STICKY;
         }
 
-        if (ACTION_SET_LEVEL.equals(action)) {
-            return START_STICKY;
+        if (ACTION_SET_PARAMS.equals(action)) {
+            if (running) {
+                getSystemService(NotificationManager.class)
+                        .notify(NOTIFICATION_ID, buildNotification());
+                return START_STICKY;
+            }
+            stopSelf();
+            return START_NOT_STICKY;
         }
 
         startForeground(NOTIFICATION_ID, buildNotification());
         startAudio();
         return START_STICKY;
+    }
+
+    private void readParams(Intent intent) {
+        if (intent == null) return;
+        if (intent.hasExtra(EXTRA_FREQUENCY_HZ)) {
+            frequencyHz = Math.max(10.0, Math.min(22000.0,
+                    intent.getDoubleExtra(EXTRA_FREQUENCY_HZ, 18.0)));
+        }
+        if (intent.hasExtra(EXTRA_LEVEL_DBFS)) {
+            levelDbfs = Math.max(-90, Math.min(-20,
+                    intent.getIntExtra(EXTRA_LEVEL_DBFS, -50)));
+        }
     }
 
     private void startAudio() {
@@ -87,13 +106,15 @@ public class KeepAliveService extends Service {
 
                 short[] buf = new short[shorts];
                 double phase = 0.0;
-                double step = 2.0 * Math.PI * TONE_HZ / SAMPLE_RATE;
                 track.play();
 
                 while (running) {
-                    int a = amplitude;
+                    double f = frequencyHz;
+                    int amplitude = dbToAmplitude(levelDbfs);
+                    double step = 2.0 * Math.PI * f / SAMPLE_RATE;
+
                     for (int i = 0; i < frames; i++) {
-                        short s = (short) Math.round(Math.sin(phase) * a);
+                        short s = (short) Math.round(Math.sin(phase) * amplitude);
                         phase += step;
                         if (phase >= 2.0 * Math.PI) phase -= 2.0 * Math.PI;
                         buf[i * 2] = s;
@@ -112,6 +133,11 @@ public class KeepAliveService extends Service {
             }
         }, "DAC-Awake-Audio");
         audioThread.start();
+    }
+
+    private int dbToAmplitude(int db) {
+        int a = (int) Math.round(32767.0 * Math.pow(10.0, db / 20.0));
+        return Math.max(1, Math.min(32767, a));
     }
 
     private void stopAudio() {
@@ -141,11 +167,12 @@ public class KeepAliveService extends Service {
         PendingIntent stopPi = PendingIntent.getService(
                 this, 1, stop, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
 
+        String text = String.format(Locale.US, "%.0f Hz / %d dBFS", frequencyHz, levelDbfs);
         Notification.Builder b = Build.VERSION.SDK_INT >= 26
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
         return b.setContentTitle("DAC Awake aktív")
-                .setContentText("Nagyon halk jel fut az USB DAC ébren tartásához")
+                .setContentText(text)
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentIntent(openPi)
                 .setOngoing(true)
